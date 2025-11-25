@@ -1,110 +1,78 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { MapContainer, TileLayer, Popup, Polyline, useMapEvents, CircleMarker, Marker } from 'react-leaflet';
-import { collection, addDoc, onSnapshot, doc, setDoc, deleteDoc, updateDoc, arrayUnion } from 'firebase/firestore';
-import { Navigation, User, Edit3, Plus, Trash2, MapPin, AlertTriangle } from 'lucide-react';
+import { collection, addDoc, onSnapshot, doc, setDoc, deleteDoc, arrayUnion } from 'firebase/firestore';
+import { Navigation, User, Edit3, Plus, Trash2, MapPin, Locate } from 'lucide-react';
 import { db } from '../firebase';
+import L from 'leaflet';
 
-// Función simple para calcular distancia en metros entre dos coords
-const getDistanceFromLatLonInKm = (lat1, lon1, lat2, lon2) => {
-    const R = 6371; // Radio tierra km
-    const dLat = (lat2 - lat1) * (Math.PI / 180);
-    const dLon = (lon2 - lon1) * (Math.PI / 180);
-    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-        Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
-        Math.sin(dLon / 2) * Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return (R * c) * 1000; // Metros
+import icon from 'leaflet/dist/images/marker-icon.png';
+import iconShadow from 'leaflet/dist/images/marker-shadow.png';
+let DefaultIcon = L.icon({ iconUrl: icon, shadowUrl: iconShadow, iconSize: [25, 41], iconAnchor: [12, 41] });
+L.Marker.prototype.options.icon = DefaultIcon;
+
+const getMarkerIcon = (color) => {
+    return new L.Icon({
+        iconUrl: `https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-${color}.png`,
+        shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+        iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41]
+    });
 };
 
 const TransportMap = ({ user, isAdmin, isDriver }) => {
     const [routes, setRoutes] = useState([]);
     const [buses, setBuses] = useState([]);
-    const [checkpoints, setCheckpoints] = useState([]); // Puntos de control del admin
+    const [pois, setPois] = useState([]);
 
-    // Modos Admin
-    const [editorMode, setEditorMode] = useState(null); // 'route' | 'checkpoint' | null
+    const [editorMode, setEditorMode] = useState(null);
     const [tempPoints, setTempPoints] = useState([]);
+    const [poiType, setPoiType] = useState('general');
+    const [routeColor, setRouteColor] = useState('#10b981'); // Color por defecto verde
 
-    // Estado Chofer
     const [isTracking, setIsTracking] = useState(false);
     const [myStatus, setMyStatus] = useState({ routeId: '', breakdown: false });
-    const lastCheckpointTime = useRef(0); // Para no spammear logs
 
-    const CENTER = [25.9080, -100.3600]; // Sabinas aprox
+    const [map, setMap] = useState(null);
+    const SABINAS_CENTER = [26.5096, -100.1769];
 
-    // 1. LEER DATOS (Rutas, Buses, Checkpoints)
     useEffect(() => {
         const unsubRoutes = onSnapshot(collection(db, 'routes'), (s) => setRoutes(s.docs.map(d => ({ id: d.id, ...d.data() }))));
         const unsubBuses = onSnapshot(collection(db, 'buses'), (s) => setBuses(s.docs.map(d => ({ id: d.id, ...d.data() }))));
-        const unsubChecks = onSnapshot(collection(db, 'checkpoints'), (s) => setCheckpoints(s.docs.map(d => ({ id: d.id, ...d.data() }))));
-        return () => { unsubRoutes(); unsubBuses(); unsubChecks(); };
+        const unsubPois = onSnapshot(collection(db, 'pois'), (s) => setPois(s.docs.map(d => ({ id: d.id, ...d.data() }))));
+        return () => { unsubRoutes(); unsubBuses(); unsubPois(); };
     }, []);
 
-    // 2. LÓGICA GPS CHOFER (Con Historial y Limpieza)
     useEffect(() => {
         let watchId;
         if (isDriver && isTracking) {
             if (!navigator.geolocation) return alert("Sin GPS");
-
             watchId = navigator.geolocation.watchPosition(async (pos) => {
                 const { latitude, longitude } = pos.coords;
                 const now = new Date();
+                const h = now.getHours(), m = now.getMinutes();
+                let shouldClear = ((h === 12 || h === 15) && m === 0);
 
-                // Lógica de Limpieza (12pm y 3pm)
-                const currentHour = now.getHours();
-                const currentMin = now.getMinutes();
-                // Si es 12:00-12:01 o 15:00-15:01, podríamos resetear (lógica simple)
-                // Idealmente esto se hace en backend, pero aquí el cliente puede decidir borrar su historial local antes de subirlo
-                let shouldClear = false;
-                if ((currentHour === 12 || currentHour === 15) && currentMin === 0) shouldClear = true;
-
-                const updateData = {
-                    lat: latitude,
-                    lng: longitude,
-                    driverName: user.name,
-                    routeId: myStatus.routeId,
-                    status: myStatus.breakdown ? 'breakdown' : 'ok',
-                    lastUpdate: now
-                };
-
-                // Si debemos limpiar, mandamos path vacío, si no, añadimos punto
-                if (shouldClear) {
-                    updateData.pathHistory = [];
-                } else {
-                    updateData.pathHistory = arrayUnion({ lat: latitude, lng: longitude });
-                }
-
-                await setDoc(doc(db, 'buses', user.uid), updateData, { merge: true });
-
-                // CHEQUEO DE PUNTOS DE CONTROL (Admin Points)
-                checkpoints.forEach(cp => {
-                    const dist = getDistanceFromLatLonInKm(latitude, longitude, cp.lat, cp.lng);
-                    if (dist < 50) { // Si pasa a menos de 50 metros
-                        const timeDiff = now.getTime() - lastCheckpointTime.current;
-                        if (timeDiff > 60000) { // Evitar logs duplicados por 1 minuto
-                            console.log(`[ALERTA RUTA] El chofer ${user.name} pasó por punto: ${cp.name} a las ${now.toLocaleTimeString()}`);
-                            lastCheckpointTime.current = now.getTime();
-                            // Opcional: Guardar log en firebase
-                        }
-                    }
-                });
-
+                await setDoc(doc(db, 'buses', user.uid), {
+                    lat: latitude, lng: longitude, driverName: user.name,
+                    routeId: myStatus.routeId, status: myStatus.breakdown ? 'breakdown' : 'ok',
+                    lastUpdate: now,
+                    pathHistory: shouldClear ? [] : arrayUnion({ lat: latitude, lng: longitude })
+                }, { merge: true });
             }, (err) => console.error(err), { enableHighAccuracy: true });
         }
         return () => { if (watchId) navigator.geolocation.clearWatch(watchId); };
-    }, [isDriver, isTracking, myStatus, checkpoints]);
+    }, [isDriver, isTracking, myStatus]);
 
-    // 3. EVENTOS DEL MAPA (Dibujar Ruta o Puntos)
     const MapEvents = () => {
         useMapEvents({
             click(e) {
                 if (!isAdmin) return;
                 if (editorMode === 'route') {
                     setTempPoints(prev => [...prev, [e.latlng.lat, e.latlng.lng]]);
-                } else if (editorMode === 'checkpoint') {
-                    const name = prompt("Nombre de este Punto de Control (ej. Parada Centro):");
+                } else if (editorMode === 'poi') {
+                    const name = prompt("Nombre del lugar:");
+                    const desc = prompt("Descripción:");
                     if (name) {
-                        addDoc(collection(db, 'checkpoints'), { name, lat: e.latlng.lat, lng: e.latlng.lng });
+                        addDoc(collection(db, 'pois'), { name, description: desc, type: poiType, lat: e.latlng.lat, lng: e.latlng.lng });
                         setEditorMode(null);
                     }
                 }
@@ -118,95 +86,89 @@ const TransportMap = ({ user, isAdmin, isDriver }) => {
         const name = prompt("Nombre de la ruta:");
         if (!name) return;
         const firestorePoints = tempPoints.map(p => ({ lat: p[0], lng: p[1] }));
-        await addDoc(collection(db, 'routes'), { name, color: '#10b981', points: firestorePoints });
+        await addDoc(collection(db, 'routes'), { name, color: routeColor, points: firestorePoints });
         setTempPoints([]); setEditorMode(null);
     };
 
     return (
         <div className="flex flex-col lg:flex-row h-[600px] gap-6">
-            <div className="flex-1 relative rounded-xl overflow-hidden border-2 border-emerald-100 shadow-lg z-0">
-                <MapContainer center={CENTER} zoom={13} style={{ height: '100%', width: '100%' }}>
+            <div className="flex-1 relative rounded-2xl overflow-hidden border border-emerald-100 shadow-2xl z-0">
+                <MapContainer center={SABINAS_CENTER} zoom={14} style={{ height: '100%', width: '100%' }} ref={setMap}>
                     <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution='&copy; OSM' />
                     <MapEvents />
 
-                    {/* Rutas Estáticas (Admin) */}
-                    {routes.map(r => <Polyline key={r.id} positions={r.points} pathOptions={{ color: r.color, weight: 5, opacity: 0.6 }} />)}
+                    {routes.map(r => <Polyline key={r.id} positions={r.points} pathOptions={{ color: r.color || '#10b981', weight: 6, opacity: 0.7 }} />)}
+                    {editorMode === 'route' && <Polyline positions={tempPoints} pathOptions={{ color: routeColor, dashArray: '10,10' }} />}
 
-                    {/* Ruta en Edición */}
-                    {editorMode === 'route' && <Polyline positions={tempPoints} pathOptions={{ color: 'black', dashArray: '10,10' }} />}
-
-                    {/* Puntos de Control (Admin) */}
-                    {checkpoints.map(cp => (
-                        <CircleMarker key={cp.id} center={[cp.lat, cp.lng]} radius={8} pathOptions={{ color: 'blue', fillColor: '#3b82f6', fillOpacity: 0.8 }}>
-                            <Popup>📍 Control: {cp.name}</Popup>
-                        </CircleMarker>
+                    {pois.map(p => (
+                        <Marker key={p.id} position={[p.lat, p.lng]} icon={getMarkerIcon(p.type === 'school' ? 'violet' : 'blue')}>
+                            <Popup>
+                                <div className="text-center">
+                                    <strong className="text-emerald-800 uppercase text-xs">{p.type === 'school' ? 'Escuela' : 'Parada'}</strong>
+                                    <h3 className="font-bold text-sm">{p.name}</h3>
+                                    <p className="text-xs text-gray-500">{p.description}</p>
+                                </div>
+                            </Popup>
+                        </Marker>
                     ))}
 
-                    {/* Buses en vivo + Historial */}
                     {buses.map(b => (
                         <React.Fragment key={b.id}>
-                            {/* Trayecto recorrido */}
                             {b.pathHistory && <Polyline positions={b.pathHistory} pathOptions={{ color: b.status === 'breakdown' ? 'red' : '#059669', weight: 3, dashArray: '5,5' }} />}
-                            {/* Posición actual */}
-                            <CircleMarker center={[b.lat, b.lng]} radius={12} pathOptions={{ color: 'white', fillColor: b.status === 'breakdown' ? 'red' : '#059669', fillOpacity: 1 }}>
-                                <Popup>
-                                    <strong>🚌 {b.driverName}</strong><br />
-                                    {b.status === 'breakdown' ? '⚠️ AVERÍA REPORTADA' : 'En ruta normal'}<br />
-                                    <span className="text-xs text-gray-500">Actualizado: {b.lastUpdate?.toDate().toLocaleTimeString()}</span>
-                                </Popup>
+                            <CircleMarker center={[b.lat, b.lng]} radius={14} pathOptions={{ color: 'white', fillColor: b.status === 'breakdown' ? '#ef4444' : '#10b981', fillOpacity: 1 }}>
+                                <Popup><strong>🚌 {b.driverName}</strong><br />{b.status === 'breakdown' ? '⚠️ AVERÍA' : 'EN RUTA'}</Popup>
                             </CircleMarker>
                         </React.Fragment>
                     ))}
                 </MapContainer>
 
+                <button onClick={() => map?.flyTo(SABINAS_CENTER, 14)} className="absolute bottom-4 right-4 bg-white p-3 rounded-full shadow-lg z-[400] hover:bg-emerald-50 text-emerald-700 transition"><Locate size={24} /></button>
+
                 {editorMode && (
-                    <div className="absolute top-4 right-4 bg-white/90 p-3 rounded shadow z-[500] text-sm border-l-4 border-blue-500">
-                        <p className="font-bold text-blue-800 mb-1">Modo Edición Activo</p>
-                        <p>{editorMode === 'route' ? 'Haz clic para trazar ruta' : 'Haz clic para poner un punto'}</p>
-                        <button onClick={() => setEditorMode(null)} className="mt-2 text-xs text-red-600 underline">Cancelar</button>
+                    <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-white/90 px-6 py-2 rounded-full shadow-xl z-[500] border-2 border-blue-500 animate-pulse text-blue-800 font-bold text-sm">
+                        {editorMode === 'route' ? '📍 Clic para trazar ruta' : '📍 Clic para colocar punto'}
+                        <button onClick={() => setEditorMode(null)} className="ml-4 text-red-500">Cancelar</button>
                     </div>
                 )}
             </div>
 
-            <div className="w-full lg:w-80 bg-white p-6 rounded-xl shadow-lg border border-gray-100 flex flex-col gap-6 overflow-y-auto">
-                <h3 className="font-bold text-xl flex items-center gap-2 text-emerald-800 border-b pb-4"><Navigation className="text-emerald-500" /> Control</h3>
+            <div className="w-full lg:w-96 bg-white p-6 rounded-2xl shadow-xl border border-gray-100 flex flex-col gap-6 overflow-y-auto">
+                <h3 className="font-extrabold text-xl text-emerald-900 flex items-center gap-2 border-b pb-4"><Navigation className="text-emerald-500" /> Panel Control</h3>
 
                 {isDriver && (
-                    <div className="bg-emerald-50 p-4 rounded-lg border border-emerald-200 space-y-3">
-                        <h4 className="font-bold text-sm text-emerald-800"><User size={14} /> PANEL CHOFER</h4>
-                        <select className="w-full p-2 rounded border bg-white" onChange={e => setMyStatus({ ...myStatus, routeId: e.target.value })}>
-                            <option value="">Selecciona Ruta...</option>
+                    <div className="bg-emerald-50 p-4 rounded-xl border border-emerald-200 space-y-3">
+                        <h4 className="font-bold text-sm text-emerald-800 flex items-center gap-2"><User size={14} /> MODO CHOFER</h4>
+                        <select className="w-full p-2 rounded border text-sm bg-white" onChange={e => setMyStatus({ ...myStatus, routeId: e.target.value })}>
+                            <option value="">Seleccionar Ruta...</option>
                             {routes.map(r => <option key={r.id} value={r.id}>{r.name}</option>)}
                         </select>
-                        <button onClick={() => setIsTracking(!isTracking)} className={`w-full py-3 rounded font-bold text-white shadow ${isTracking ? 'bg-red-500' : 'bg-emerald-600'}`}>{isTracking ? 'DETENER' : 'INICIAR RUTA'}</button>
-                        {isTracking && <button onClick={() => setMyStatus(p => ({ ...p, breakdown: !p.breakdown }))} className={`w-full py-2 border-2 rounded font-bold flex items-center justify-center gap-2 ${myStatus.breakdown ? 'bg-red-100 border-red-500 text-red-800' : 'bg-white'}`}>
-                            {myStatus.breakdown ? '🛠 YA ESTÁ REPARADO' : '⚠️ REPORTAR FALLA'}
-                        </button>}
+                        <button onClick={() => setIsTracking(!isTracking)} className={`w-full py-2 rounded-lg font-bold text-white text-sm ${isTracking ? 'bg-red-500' : 'bg-emerald-600'}`}>{isTracking ? 'DETENER GPS' : 'INICIAR RUTA'}</button>
+                        {isTracking && <button onClick={() => setMyStatus(p => ({ ...p, breakdown: !p.breakdown }))} className="w-full py-2 bg-white border border-red-200 text-red-600 rounded-lg text-xs font-bold">⚠️ REPORTAR FALLA</button>}
                     </div>
                 )}
 
                 {isAdmin && (
-                    <div className="bg-slate-50 p-4 rounded-lg border border-slate-200 space-y-3">
-                        <h4 className="font-bold text-sm text-slate-700 mb-3"><Edit3 size={14} /> ADMINISTRAR MAPA</h4>
-
+                    <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3">
+                        <h4 className="font-bold text-sm text-slate-700 mb-2"><Edit3 size={14} /> EDITOR MAPA</h4>
                         {!editorMode ? (
-                            <div className="grid grid-cols-2 gap-2">
-                                <button onClick={() => { setEditorMode('route'); setTempPoints([]); }} className="py-2 bg-blue-600 text-white rounded font-bold text-xs flex items-center justify-center gap-1"><Plus size={14} /> Ruta</button>
-                                <button onClick={() => setEditorMode('checkpoint')} className="py-2 bg-indigo-600 text-white rounded font-bold text-xs flex items-center justify-center gap-1"><MapPin size={14} /> Punto</button>
+                            <div className="grid grid-cols-1 gap-2">
+                                <div className="flex gap-2">
+                                    <select className="text-xs border rounded p-1 flex-1" onChange={e => setRouteColor(e.target.value)}>
+                                        <option value="#10b981">Verde</option><option value="#3b82f6">Azul</option><option value="#ef4444">Rojo</option><option value="#eab308">Amarillo</option><option value="#a855f7">Morado</option>
+                                    </select>
+                                    <button onClick={() => { setEditorMode('route'); setTempPoints([]); }} className="bg-blue-600 text-white py-2 rounded text-xs font-bold px-4">Ruta</button>
+                                </div>
+                                <div className="flex gap-2">
+                                    <select className="text-xs border rounded p-1 flex-1" onChange={e => setPoiType(e.target.value)}><option value="general">Punto</option><option value="school">Escuela</option><option value="stop">Parada</option></select>
+                                    <button onClick={() => setEditorMode('poi')} className="bg-indigo-600 text-white px-4 rounded text-xs font-bold">Punto</button>
+                                </div>
                             </div>
                         ) : (
-                            editorMode === 'route' && (
-                                <div className="flex gap-2">
-                                    <button onClick={saveRoute} className="flex-1 py-2 bg-green-600 text-white rounded text-xs font-bold">Guardar Ruta</button>
-                                </div>
-                            )
+                            editorMode === 'route' && <button onClick={saveRoute} className="w-full py-2 bg-green-600 text-white rounded text-xs font-bold">GUARDAR RUTA</button>
                         )}
-
-                        <div className="mt-4 space-y-2 max-h-40 overflow-y-auto">
-                            <p className="text-[10px] font-bold text-gray-400 uppercase">Rutas Activas</p>
-                            {routes.map(r => (<div key={r.id} className="flex justify-between items-center text-xs bg-white p-2 border rounded"><span>{r.name}</span><button onClick={() => deleteDoc(doc(db, 'routes', r.id))} className="text-red-400"><Trash2 size={12} /></button></div>))}
-                            <p className="text-[10px] font-bold text-gray-400 uppercase mt-2">Puntos Control</p>
-                            {checkpoints.map(c => (<div key={c.id} className="flex justify-between items-center text-xs bg-white p-2 border rounded"><span>{c.name}</span><button onClick={() => deleteDoc(doc(db, 'checkpoints', c.id))} className="text-red-400"><Trash2 size={12} /></button></div>))}
+                        <div className="mt-4 space-y-1 max-h-40 overflow-y-auto">
+                            {routes.map(r => (<div key={r.id} className="flex justify-between text-xs p-2 bg-white border rounded"><span style={{ color: r.color }}>● {r.name}</span><button onClick={() => deleteDoc(doc(db, 'routes', r.id))} className="text-red-400"><Trash2 size={10} /></button></div>))}
+                            {pois.map(p => (<div key={p.id} className="flex justify-between text-xs p-2 bg-white border rounded"><span className="truncate w-20">{p.name}</span><button onClick={() => deleteDoc(doc(db, 'pois', p.id))} className="text-red-400"><Trash2 size={10} /></button></div>))}
                         </div>
                     </div>
                 )}
