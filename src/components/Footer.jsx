@@ -1,4 +1,5 @@
 import React from 'react';
+import { Facebook, Instagram, Video } from 'lucide-react'; // Usamos Video como placeholder para TikTok si no está el icono específico
 
 const Footer = () => {
     return (
@@ -6,12 +7,18 @@ const Footer = () => {
             <div className="max-w-7xl mx-auto px-4 grid md:grid-cols-4 gap-8">
                 <div className="col-span-2">
                     <h4 className="text-white font-bold text-lg mb-4 flex items-center gap-2">
-                        <div className="w-8 h-8 bg-emerald-800 rounded flex items-center justify-center text-white text-xs">U</div>
+                        <div className="w-8 h-8 bg-emerald-800 rounded flex items-center justify-center text-white text-xs shadow-lg">U</div>
                         UTE Escobedo
                     </h4>
-                    <p className="opacity-70 leading-relaxed max-w-sm">
+                    <p className="opacity-70 leading-relaxed max-w-sm mb-6">
                         Comprometidos con la excelencia académica y el desarrollo tecnológico de nuestra comunidad estudiantil en Nuevo León.
                     </p>
+                    {/* REDES SOCIALES */}
+                    <div className="flex gap-3">
+                        <a href="https://facebook.com" target="_blank" rel="noreferrer" className="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center hover:bg-blue-700 transition shadow-lg hover:scale-110"><Facebook size={20} /></a>
+                        <a href="https://instagram.com" target="_blank" rel="noreferrer" className="w-10 h-10 rounded-full bg-pink-600 text-white flex items-center justify-center hover:bg-pink-700 transition shadow-lg hover:scale-110"><Instagram size={20} /></a>
+                        <a href="https://tiktok.com" target="_blank" rel="noreferrer" className="w-10 h-10 rounded-full bg-black text-white border border-gray-700 flex items-center justify-center hover:bg-gray-800 transition shadow-lg hover:scale-110"><Video size={20} /></a>
+                    </div>
                 </div>
 
                 <div>
